@@ -20,7 +20,7 @@ class AE():
         if len(edit_parts) == 1:
             command.extend(['--edit', edit_parts[0]])
         elif len(edit_parts) > 1:
-            command.extend(['--edit', f'({" or ".join(edit_parts)})'])
+            command.extend(['--edit', f'(or {" ".join(edit_parts)})'])
 
         command.extend(['--margin', f'{arg.margin}s'])
 
