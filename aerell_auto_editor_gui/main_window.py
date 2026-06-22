@@ -13,7 +13,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(f'{APP_NAME} - {APP_VERSION}')
-        self.resize(500, 300)
+        self.resize(500, 620)
 
         layout = QHBoxLayout()
 
