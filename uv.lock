@@ -4,7 +4,7 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aerell-auto-editor-gui"
-version = "0.0.3"
+version = "0.0.5"
 source = { virtual = "." }
 dependencies = [
     { name = "auto-editor" },
