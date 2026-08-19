@@ -1,8 +1,10 @@
 import os
+import tempfile
 from aerell_auto_editor_gui.ae_export_enum import AEExportEnum
 from aerell_auto_editor_gui.ae_arg import AEArgument
 from aerell_auto_editor_gui.ae import AE
 from aerell_auto_editor_gui.ae_worker import AEWorker
+from aerell_auto_editor_gui.beutl_export import convert_v3_to_beutl
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget,
@@ -26,6 +28,8 @@ class AEWidget(QWidget):
         self._ae = ae
         self._arg = arg
         self._worker: AEWorker | None = None
+        self._beutl_temp_json: str | None = None
+        self._beutl_output: str | None = None
 
         layout = QVBoxLayout(self)
 
@@ -228,7 +232,17 @@ class AEWidget(QWidget):
     # ── Execute ────────────────────────────────────────────────
 
     def _button_execute_clicked(self):
-        args = self._ae.gen(self._arg)
+        self._beutl_temp_json = None
+        self._beutl_output = None
+
+        if self._arg.export == AEExportEnum.BEUTL:
+            self._beutl_output = self._arg.output or self._default_beutl_output()
+            fd, temp_path = tempfile.mkstemp(suffix='.v3', prefix='aerell_beutl_')
+            os.close(fd)
+            self._beutl_temp_json = temp_path
+            args = self._ae.gen_beutl_intermediate(self._arg, temp_path)
+        else:
+            args = self._ae.gen(self._arg)
 
         self._output_area.clear()
         self._output_area.appendPlainText('$ auto-editor ' + ' '.join(args))
@@ -241,11 +255,28 @@ class AEWidget(QWidget):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
+    def _default_beutl_output(self) -> str:
+        root, _ext = os.path.splitext(self._arg.inputs[0])
+        return f'{root}_ALTERED.bep'
+
     def _on_worker_output(self, line: str):
         self._output_area.appendPlainText(line)
 
     def _on_worker_finished(self, returncode: int):
-        if returncode == 0:
+        if returncode == 0 and self._beutl_temp_json is not None:
+            try:
+                bep_path = convert_v3_to_beutl(self._beutl_temp_json, self._beutl_output)
+                self._output_area.appendPlainText(f'\nWrote Beutl project: {bep_path}')
+                self._output_area.appendPlainText('\nDone.')
+            except Exception as e:
+                self._output_area.appendPlainText(f'\n[ERROR] Failed to build Beutl project: {e}')
+            finally:
+                try:
+                    os.remove(self._beutl_temp_json)
+                except OSError:
+                    pass
+                self._beutl_temp_json = None
+        elif returncode == 0:
             self._output_area.appendPlainText('\nDone.')
         else:
             self._output_area.appendPlainText(f'\nFailed (exit code: {returncode})')
