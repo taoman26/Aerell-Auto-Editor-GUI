@@ -81,9 +81,26 @@ def _build_track(
     track_index: int,
     source_ids: _IdAllocator,
     element_counter: list,
+    playlist_counter: list,
 ) -> ET.Element:
+    # Kdenlive models each timeline track as a tractor wrapping exactly two
+    # playlists (a Kdenlive/MLT convention, seen e.g. in KdenliveDoc::
+    # createEmptyDocument, which always inserts two playlists per track).
+    # A tractor with only one <track> is treated as corrupted ("wrong
+    # number of subtracks") and Kdenlive segfaults shortly after trying to
+    # recover it. All clip entries go in the first playlist; the second is
+    # kept empty, matching what real Kdenlive/auto-editor output does.
     is_video = kind == 'video'
-    playlist = ET.SubElement(mlt, 'playlist', id=f'playlist{track_index}')
+    playlist_id = f'playlist{playlist_counter[0]}'
+    playlist = ET.SubElement(mlt, 'playlist', id=playlist_id)
+    if not is_video:
+        _prop(playlist, 'kdenlive:audio_track', '1')
+    playlist_counter[0] += 1
+    blank_playlist_id = f'playlist{playlist_counter[0]}'
+    blank_playlist = ET.SubElement(mlt, 'playlist', id=blank_playlist_id)
+    if not is_video:
+        _prop(blank_playlist, 'kdenlive:audio_track', '1')
+    playlist_counter[0] += 1
 
     position = 0
     for clip in sorted(clips, key=lambda c: c['start']):
@@ -132,11 +149,9 @@ def _build_track(
     if not is_video:
         _prop(tractor, 'kdenlive:audio_track', '1')
     _prop(tractor, 'kdenlive:timeline_active', '1')
-    ET.SubElement(
-        tractor,
-        'track',
-        attrib={'hide': 'audio' if is_video else 'video', 'producer': f'playlist{track_index}'},
-    )
+    hide = 'audio' if is_video else 'video'
+    ET.SubElement(tractor, 'track', attrib={'hide': hide, 'producer': playlist_id})
+    ET.SubElement(tractor, 'track', attrib={'hide': hide, 'producer': blank_playlist_id})
     return tractor
 
 
@@ -215,6 +230,7 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
 
     source_ids = _IdAllocator(start=4)
     element_counter = [0]
+    playlist_counter = [0]
     track_index = 0
     sequence_tracks: list[str] = []
 
@@ -223,6 +239,7 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
             mlt, audio_clips, tb, global_out,
             kind='audio', track_index=track_index,
             source_ids=source_ids, element_counter=element_counter,
+            playlist_counter=playlist_counter,
         )
         sequence_tracks.append(tractor.get('id'))
         track_index += 1
@@ -232,6 +249,7 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
             mlt, video_clips, tb, global_out,
             kind='video', track_index=track_index,
             source_ids=source_ids, element_counter=element_counter,
+            playlist_counter=playlist_counter,
         )
         sequence_tracks.append(tractor.get('id'))
         track_index += 1
