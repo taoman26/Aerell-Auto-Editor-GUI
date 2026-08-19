@@ -91,31 +91,24 @@ def _build_track(
     # recover it. All clip entries go in the first playlist; the second is
     # kept empty, matching what real Kdenlive/auto-editor output does.
     is_video = kind == 'video'
-    playlist_id = f'playlist{playlist_counter[0]}'
-    playlist = ET.SubElement(mlt, 'playlist', id=playlist_id)
-    if not is_video:
-        _prop(playlist, 'kdenlive:audio_track', '1')
-    playlist_counter[0] += 1
-    blank_playlist_id = f'playlist{playlist_counter[0]}'
-    blank_playlist = ET.SubElement(mlt, 'playlist', id=blank_playlist_id)
-    if not is_video:
-        _prop(blank_playlist, 'kdenlive:audio_track', '1')
-    playlist_counter[0] += 1
+    sorted_clips = sorted(clips, key=lambda c: c['start'])
 
+    # Create every chain/producer this track's clips need *before* the
+    # playlist that references them. MLT's XML parser resolves an <entry
+    # producer="X"> against a table of ids parsed so far, filled in as it
+    # scans the document top-to-bottom in a single pass — a forward
+    # reference to an id defined later in the file silently fails to
+    # resolve rather than being picked up on some later pass, which left
+    # Kdenlive unable to find the clips it needed and hanging on preview.
+    #
     # Clips that share a source file at normal speed reuse a single chain
     # (their kdenlive:id / stream-masking properties are identical), the
     # same way a genuine Kdenlive project only has one bin producer per
     # source file rather than one per cut. Speed-warped clips still get
     # their own dedicated producer per instance, since warp_speed differs.
     path_chain_cache: dict[str, str] = {}
-
-    position = 0
-    for clip in sorted(clips, key=lambda c: c['start']):
-        if clip['start'] > position:
-            gap = (clip['start'] - position) / tb
-            ET.SubElement(playlist, 'blank', length=_to_timecode(gap))
-        position = clip['start'] + clip['dur']
-
+    clip_element_ids: list[str] = []
+    for clip in sorted_clips:
         path = os.path.abspath(clip['src'])
         speed = float(clip.get('speed', 1.0))
         source_id = source_ids.get(path)
@@ -146,6 +139,27 @@ def _build_track(
             _prop(element, 'set.test_video', '0' if is_video else '1')
             _prop(element, 'kdenlive:id', source_id)
 
+        clip_element_ids.append(element_id)
+
+    playlist_id = f'playlist{playlist_counter[0]}'
+    playlist = ET.SubElement(mlt, 'playlist', id=playlist_id)
+    if not is_video:
+        _prop(playlist, 'kdenlive:audio_track', '1')
+    playlist_counter[0] += 1
+    blank_playlist_id = f'playlist{playlist_counter[0]}'
+    blank_playlist = ET.SubElement(mlt, 'playlist', id=blank_playlist_id)
+    if not is_video:
+        _prop(blank_playlist, 'kdenlive:audio_track', '1')
+    playlist_counter[0] += 1
+
+    position = 0
+    for clip, element_id in zip(sorted_clips, clip_element_ids):
+        if clip['start'] > position:
+            gap = (clip['start'] - position) / tb
+            ET.SubElement(playlist, 'blank', length=_to_timecode(gap))
+        position = clip['start'] + clip['dur']
+
+        source_id = source_ids.get(os.path.abspath(clip['src']))
         in_tc = _to_timecode(clip['offset'] / tb)
         out_tc = _to_timecode((clip['offset'] + clip['dur']) / tb)
         entry = ET.SubElement(
@@ -232,14 +246,6 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
     _prop(producer0, 'mlt_image_format', 'rgba')
     _prop(producer0, 'aspect_ratio', '1')
 
-    # Reserve main_bin's position as the *first* <playlist> element in the
-    # file now (filled in below, once the sequence uuid is known). Kdenlive
-    # locates kdenlive:docproperties.version via mlt.firstChildElement
-    # ("playlist") — the first <playlist> in document order — so if a
-    # per-track playlist ends up first instead, Kdenlive can't find the
-    # version property and refuses to open the project.
-    playlist_bin = ET.SubElement(mlt, 'playlist', id='main_bin')
-
     source_ids = _IdAllocator(start=4)
     element_counter = [0]
     playlist_counter = [0]
@@ -299,6 +305,19 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
     for track_id in sequence_tracks:
         ET.SubElement(sequence, 'track', producer=track_id)
 
+    # main_bin must come after everything it references (the sequence
+    # tractor above, and the bin chains above that) — MLT's XML parser
+    # resolves an <entry producer="X"> by looking X up in a table of
+    # already-parsed ids; a forward reference to an id defined later in
+    # the document silently fails ("Property without a parent" in MLT's
+    # log) rather than being resolved on a second pass. This does mean
+    # Kdenlive's cruder pre-parse version sniff (which just checks
+    # properties on the *first* <playlist> tag in the raw XML, unrelated
+    # to MLT's own parser) won't find kdenlive:docproperties.version here
+    # and shows a one-time "version cannot be read, opening anyway"
+    # notice — harmless, since it then treats the file as the current doc
+    # version and proceeds normally.
+    playlist_bin = ET.SubElement(mlt, 'playlist', id='main_bin')
     _prop(playlist_bin, 'kdenlive:docproperties.uuid', f'{{{seq_uuid}}}')
     _prop(playlist_bin, 'kdenlive:docproperties.version', '1.1')
     _prop(playlist_bin, 'xml_retain', '1')
