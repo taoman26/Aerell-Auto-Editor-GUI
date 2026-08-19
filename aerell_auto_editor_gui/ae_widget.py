@@ -1,8 +1,17 @@
 import os
+import tempfile
 from aerell_auto_editor_gui.ae_export_enum import AEExportEnum
 from aerell_auto_editor_gui.ae_arg import AEArgument
 from aerell_auto_editor_gui.ae import AE
 from aerell_auto_editor_gui.ae_worker import AEWorker
+from aerell_auto_editor_gui.kdenlive_export import convert_v3_to_kdenlive
+
+# Export formats built from auto-editor's v3 timeline JSON rather than by
+# auto-editor's own --export flag (see AE.NATIVE_EXCLUDED_EXPORTS). Maps
+# each such format to (converter function, default output extension).
+V3_BASED_EXPORTS = {
+    AEExportEnum.KDENLIVE: (convert_v3_to_kdenlive, '.kdenlive'),
+}
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget,
@@ -26,6 +35,8 @@ class AEWidget(QWidget):
         self._ae = ae
         self._arg = arg
         self._worker: AEWorker | None = None
+        self._v3_temp_json: str | None = None
+        self._v3_output: str | None = None
 
         layout = QVBoxLayout(self)
 
@@ -228,7 +239,19 @@ class AEWidget(QWidget):
     # ── Execute ────────────────────────────────────────────────
 
     def _button_execute_clicked(self):
-        args = self._ae.gen(self._arg)
+        self._v3_temp_json = None
+        self._v3_output = None
+
+        v3_export = V3_BASED_EXPORTS.get(self._arg.export)
+        if v3_export is not None:
+            _converter, default_ext = v3_export
+            self._v3_output = self._arg.output or self._default_output(default_ext)
+            fd, temp_path = tempfile.mkstemp(suffix='.v3', prefix='aerell_export_')
+            os.close(fd)
+            self._v3_temp_json = temp_path
+            args = self._ae.gen_v3_intermediate(self._arg, temp_path)
+        else:
+            args = self._ae.gen(self._arg)
 
         self._output_area.clear()
         self._output_area.appendPlainText('$ auto-editor ' + ' '.join(args))
@@ -241,11 +264,29 @@ class AEWidget(QWidget):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
+    def _default_output(self, ext: str) -> str:
+        root, _ext = os.path.splitext(self._arg.inputs[0])
+        return f'{root}_ALTERED{ext}'
+
     def _on_worker_output(self, line: str):
         self._output_area.appendPlainText(line)
 
     def _on_worker_finished(self, returncode: int):
-        if returncode == 0:
+        if returncode == 0 and self._v3_temp_json is not None:
+            converter, _default_ext = V3_BASED_EXPORTS[self._arg.export]
+            try:
+                out_path = converter(self._v3_temp_json, self._v3_output)
+                self._output_area.appendPlainText(f'\nWrote: {out_path}')
+                self._output_area.appendPlainText('\nDone.')
+            except Exception as e:
+                self._output_area.appendPlainText(f'\n[ERROR] Failed to build project: {e}')
+            finally:
+                try:
+                    os.remove(self._v3_temp_json)
+                except OSError:
+                    pass
+                self._v3_temp_json = None
+        elif returncode == 0:
             self._output_area.appendPlainText('\nDone.')
         else:
             self._output_area.appendPlainText(f'\nFailed (exit code: {returncode})')
