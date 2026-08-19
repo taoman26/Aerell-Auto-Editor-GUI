@@ -24,6 +24,29 @@ def _aspect_ratio(width: int, height: int) -> tuple[int, int]:
     return width // g, height // g
 
 
+# Kdenlive/MLT only accept integer fps or the three canonical NTSC
+# fractions as a project profile's frame rate (ProfileInfo::hasValidFps() in
+# Kdenlive's source). auto-editor's v3 timebase, especially once multiple
+# source files with different native rates are combined, can come out as an
+# arbitrary fraction (e.g. 2963/100), which Kdenlive rejects with a "non
+# standard framerate" error and then fails to load the project. Clip
+# positions in this file are written as real-time timecodes (see
+# _to_timecode below), not as frame counts against this profile, so
+# snapping only the declared profile fps to something Kdenlive accepts does
+# not affect edit accuracy.
+_NTSC_FRACTIONS = ((24000, 1001), (30000, 1001), (60000, 1001))
+
+
+def _profile_fps(tb: Fraction) -> tuple[int, int]:
+    fps = float(tb)
+    if fps == int(fps):
+        return int(fps), 1
+    for num, den in _NTSC_FRACTIONS:
+        if abs(fps - num / den) < 0.05:
+            return num, den
+    return round(fps), 1
+
+
 def _to_timecode(seconds: float) -> str:
     sign = '-' if seconds < 0 else ''
     seconds = abs(seconds)
@@ -154,6 +177,7 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
     )
 
     num, den = _aspect_ratio(width, height)
+    profile_fps_num, profile_fps_den = _profile_fps(tb)
     ET.SubElement(
         mlt,
         'profile',
@@ -166,8 +190,8 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
             'sample_aspect_den': '1',
             'display_aspect_num': str(num),
             'display_aspect_den': str(den),
-            'frame_rate_num': str(tb.numerator),
-            'frame_rate_den': str(tb.denominator),
+            'frame_rate_num': str(profile_fps_num),
+            'frame_rate_den': str(profile_fps_den),
             'colorspace': '709',
         },
     )
@@ -180,6 +204,14 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
     _prop(producer0, 'kdenlive:playlistid', 'black_track')
     _prop(producer0, 'mlt_image_format', 'rgba')
     _prop(producer0, 'aspect_ratio', '1')
+
+    # Reserve main_bin's position as the *first* <playlist> element in the
+    # file now (filled in below, once the sequence uuid is known). Kdenlive
+    # locates kdenlive:docproperties.version via mlt.firstChildElement
+    # ("playlist") — the first <playlist> in document order — so if a
+    # per-track playlist ends up first instead, Kdenlive can't find the
+    # version property and refuses to open the project.
+    playlist_bin = ET.SubElement(mlt, 'playlist', id='main_bin')
 
     source_ids = _IdAllocator(start=4)
     element_counter = [0]
@@ -223,7 +255,6 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
     for track_id in sequence_tracks:
         ET.SubElement(sequence, 'track', producer=track_id)
 
-    playlist_bin = ET.SubElement(mlt, 'playlist', id='main_bin')
     _prop(playlist_bin, 'kdenlive:docproperties.uuid', f'{{{seq_uuid}}}')
     _prop(playlist_bin, 'kdenlive:docproperties.version', '1.1')
     _prop(playlist_bin, 'xml_retain', '1')
