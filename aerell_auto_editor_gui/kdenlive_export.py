@@ -102,6 +102,13 @@ def _build_track(
         _prop(blank_playlist, 'kdenlive:audio_track', '1')
     playlist_counter[0] += 1
 
+    # Clips that share a source file at normal speed reuse a single chain
+    # (their kdenlive:id / stream-masking properties are identical), the
+    # same way a genuine Kdenlive project only has one bin producer per
+    # source file rather than one per cut. Speed-warped clips still get
+    # their own dedicated producer per instance, since warp_speed differs.
+    path_chain_cache: dict[str, str] = {}
+
     position = 0
     for clip in sorted(clips, key=lambda c: c['start']):
         if clip['start'] > position:
@@ -112,27 +119,32 @@ def _build_track(
         path = os.path.abspath(clip['src'])
         speed = float(clip.get('speed', 1.0))
         source_id = source_ids.get(path)
-        element_id = f'element{element_counter[0]}'
-        element_counter[0] += 1
 
-        if speed == 1.0:
-            element = ET.SubElement(mlt, 'chain', id=element_id)
+        if speed == 1.0 and path in path_chain_cache:
+            element_id = path_chain_cache[path]
         else:
-            element = ET.SubElement(
-                mlt, 'producer', id=element_id, attrib={'in': '00:00:00.000', 'out': global_out}
-            )
-            _prop(element, 'warp_speed', str(speed))
-            _prop(element, 'warp_resource', path)
-            _prop(element, 'warp_pitch', '0')
+            element_id = f'element{element_counter[0]}'
+            element_counter[0] += 1
 
-        resource = path if speed == 1.0 else f'{speed}:{path}'
-        _prop(element, 'resource', resource)
-        _prop(element, 'mlt_service', 'timewarp' if speed != 1.0 else 'avformat-novalidate')
-        _prop(element, 'vstream', '0')
-        _prop(element, 'astream', '0')
-        _prop(element, 'set.test_audio', '1' if is_video else '0')
-        _prop(element, 'set.test_video', '0' if is_video else '1')
-        _prop(element, 'kdenlive:id', source_id)
+            if speed == 1.0:
+                element = ET.SubElement(mlt, 'chain', id=element_id)
+                path_chain_cache[path] = element_id
+            else:
+                element = ET.SubElement(
+                    mlt, 'producer', id=element_id, attrib={'in': '00:00:00.000', 'out': global_out}
+                )
+                _prop(element, 'warp_speed', str(speed))
+                _prop(element, 'warp_resource', path)
+                _prop(element, 'warp_pitch', '0')
+
+            resource = path if speed == 1.0 else f'{speed}:{path}'
+            _prop(element, 'resource', resource)
+            _prop(element, 'mlt_service', 'timewarp' if speed != 1.0 else 'avformat-novalidate')
+            _prop(element, 'vstream', '0')
+            _prop(element, 'astream', '0')
+            _prop(element, 'set.test_audio', '1' if is_video else '0')
+            _prop(element, 'set.test_video', '0' if is_video else '1')
+            _prop(element, 'kdenlive:id', source_id)
 
         in_tc = _to_timecode(clip['offset'] / tb)
         out_tc = _to_timecode((clip['offset'] + clip['dur']) / tb)
@@ -254,12 +266,26 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
         sequence_tracks.append(tractor.get('id'))
         track_index += 1
 
-    bin_clip = (video_clips or audio_clips)[0]
-    bin_path = os.path.abspath(bin_clip['src'])
-    bin_chain = ET.SubElement(mlt, 'chain', id='chainbin')
-    _prop(bin_chain, 'resource', bin_path)
-    _prop(bin_chain, 'mlt_service', 'avformat-novalidate')
-    _prop(bin_chain, 'kdenlive:id', source_ids.get(bin_path))
+    # Register every distinct source file as its own project-bin clip (a
+    # plain chain, independent of the stream-masked ones used on tracks).
+    # Kdenlive resolves clip metadata/thumbnails for a kdenlive:id through
+    # its bin model; a clip whose id has no bin entry left the monitor
+    # unable to resolve it and hung generating a thumbnail for it.
+    bin_element_ids: list[str] = []
+    seen_bin_paths: set[str] = set()
+    for clip in video_clips + audio_clips:
+        path = os.path.abspath(clip['src'])
+        if path in seen_bin_paths:
+            continue
+        seen_bin_paths.add(path)
+
+        element_id = f'element{element_counter[0]}'
+        element_counter[0] += 1
+        bin_chain = ET.SubElement(mlt, 'chain', id=element_id)
+        _prop(bin_chain, 'resource', path)
+        _prop(bin_chain, 'mlt_service', 'avformat-novalidate')
+        _prop(bin_chain, 'kdenlive:id', source_ids.get(path))
+        bin_element_ids.append(element_id)
 
     seq_uuid = uuid4()
     sequence = ET.SubElement(
@@ -281,9 +307,10 @@ def convert_v3_to_kdenlive(v3_json_path: str, output_path: str) -> str:
         'entry',
         attrib={'producer': f'{{{seq_uuid}}}', 'in': '00:00:00.000', 'out': '00:00:00.000'},
     )
-    ET.SubElement(
-        playlist_bin, 'entry', attrib={'producer': 'chainbin', 'in': '00:00:00.000'}
-    )
+    for element_id in bin_element_ids:
+        ET.SubElement(
+            playlist_bin, 'entry', attrib={'producer': element_id, 'in': '00:00:00.000'}
+        )
 
     final_tractor = ET.SubElement(
         mlt,
